@@ -77,9 +77,9 @@ corrective rag project/
 
 | File | Purpose |
 | --- | --- |
-| `app.py` | Streamlit entrypoint. Renders the sidebar (env status, KB URLs, models), the question form, per-turn answers, the workflow trace, and the graded/retrieved documents. |
-| `agent_graph.py` | Defines `SharedState`, the `GradeDocuments` pydantic model, and seven LangGraph nodes: `get_model`, `get_relevant_documents`, `grade_and_filter_documents`, `decide_to_generate` (conditional edge), `transform_query`, `perform_web_search`, `generate_answer_from_documents`. |
-| `vector_store.py` | Builds a `chromadb.CloudClient`, creates the `rag-chroma` collection on first run by embedding the two knowledge-base URLs, and exposes a cached retriever (`@st.cache_resource`). Also handles collection reset. |
+| `app.py` | Streamlit entrypoint. Renders the sidebar (env status, models), PDF upload/index controls, the question form, per-turn answers, the workflow trace, and the graded/retrieved documents. |
+| `agent_graph.py` | Defines `SharedState` and the LangGraph nodes: `get_model`, `get_relevant_documents`, `grade_and_filter_documents`, `decide_to_generate` (conditional edge), `transform_query`, `perform_web_search`, `generate_answer_from_documents`. |
+| `vector_store.py` | Builds a `chromadb.CloudClient`, indexes uploaded PDFs into the `rag-pdf-chroma` collection with BGE embeddings, exposes existing retrievers, and handles collection reset. |
 | `guardrails.py` | Two-stage input guardrail: regex-based prompt-injection detection (40+ keywords + 30+ patterns) and PII redaction (14 categories) applied before any LLM call. |
 | `run.py` | Launches Streamlit headless on `STREAMLIT_PORT` and opens an ngrok tunnel to it, printing the public URL. |
 | `prompts.py` | Two system prompts — `GRADE_DOCUMENTS_PROMPT` and `QUESTION_REWRITER_PROMPT`. |
@@ -130,11 +130,12 @@ Edit `.env` and fill in the values described in [Configuration](#configuration).
 streamlit run app.py
 ```
 
-Streamlit will open the UI at `http://localhost:8501`. The first time you submit a question, the app will:
+Streamlit will open the UI at `http://localhost:8501`. The normal flow is:
 
-1. Connect to Chroma Cloud.
-2. If the `rag-chroma` collection does not exist, load the two knowledge-base URLs, split them into ~250-token chunks, embed them with BGE, and upload the vectors to Chroma Cloud.
-3. Cache the retriever for the rest of the session.
+1. Upload one or more PDFs.
+2. Click **Index uploaded PDFs**.
+3. The app splits the PDF text into chunks, embeds them with BGE, and uploads vectors to Chroma Cloud collection `rag-pdf-chroma`.
+4. Ask questions against the indexed PDF knowledge base.
 
 ### Public URL via ngrok (pyngrok)
 
@@ -195,11 +196,11 @@ The LangGraph workflow in `agent_graph.py` is:
 | --- | --- | --- |
 | 1 | `get_model` | Initializes a `ChatOpenAI` pointed at the Kimchi base URL with the configured LLM. |
 | 2 | `get_relevant_documents` | Calls the Chroma Cloud retriever with the user's question. |
-| 3 | `grade_and_filter_documents` | Uses the LLM (with `with_structured_output(GradeDocuments)`) to grade every chunk as `yes`/`no`. Only relevant chunks are kept. |
+| 3 | `grade_and_filter_documents` | Uses the LLM to return `yes`/`no`, then a robust parser strips `<think>...</think>` and extracts the grade without strict JSON parsing. Only relevant chunks are kept. |
 | 4 | `decide_to_generate` | Conditional edge. If at least one chunk is relevant → `generate`. Otherwise → `transform_query`. |
 | 5 | `transform_query` | Rewrites the question to be more web-search-friendly. |
 | 6 | `perform_web_search` | Calls `TavilySearch` and uses the returned snippets as new context. |
-| 7 | `generate_answer_from_documents` | Pulls the `rlm/rag-prompt` from LangChain Hub and generates the final answer with the kept context. |
+| 7 | `generate_answer_from_documents` | Uses the inlined RAG prompt and generates the final answer with the kept context. |
 
 Every node appends a human-readable line to `state["trace"]`, which the Streamlit UI displays in the "Workflow trace" expander.
 
@@ -221,6 +222,7 @@ All settings are read from environment variables (loaded by `python-dotenv`).
 | `CHROMA_API_KEY` | — (required) | Chroma Cloud API key. |
 | `CHROMA_TENANT` | — (required) | Chroma Cloud tenant ID. |
 | `CHROMA_DATABASE` | — (required) | Chroma Cloud database name. |
+| `CHROMA_COLLECTION_NAME` | `rag-pdf-chroma` | Chroma Cloud collection used for uploaded PDF chunks. |
 | `NGROK_AUTH_TOKEN` | — (optional, for public URL) | ngrok authtoken used by `run.py`. |
 | `NGROK_DOMAIN` | _empty_ | Optional reserved ngrok domain (paid plan). |
 | `STREAMLIT_PORT` | `8501` | Local port Streamlit binds to; the ngrok tunnel points here. |
@@ -233,21 +235,17 @@ All settings are read from environment variables (loaded by `python-dotenv`).
 
 The UI has three regions:
 
-1. **Sidebar** — environment variable status (which keys are present), the knowledge base URLs, the active LLM / embedding model, and a "Reset Chroma Cloud collection" button.
-2. **Question form** — a single text input with an "Ask the agent" submit button.
-3. **History** — every submitted question is appended to session history. Each turn shows:
-   - The final answer.
-   - A banner indicating whether the answer came from Chroma Cloud or the Tavily fallback.
-   - The full workflow trace.
-   - A list of graded documents (relevant / not relevant).
-   - The retrieved context chunks (or web-search snippets).
+1. **Sidebar** — environment variable status (which keys are present), the active LLM / embedding model, the active Chroma collection, and a "Reset Chroma Cloud collection" button.
+2. **PDF indexer** — upload one or more PDFs, click "Index uploaded PDFs", or load an existing Chroma collection.
+3. **Question form** — a single text input with an "Ask the agent" submit button. It is valid only after PDF indexing or existing collection loading.
+4. **History** — every submitted question is appended to session history. Each turn shows the final answer, source path (Chroma or Tavily), workflow trace, graded documents, and retrieved context chunks.
 
 ---
 
 ## Troubleshooting
 
 - **`Failed to initialize vector store`** — make sure `CHROMA_API_KEY`, `CHROMA_TENANT`, and `CHROMA_DATABASE` are all set. The check in the sidebar will mark missing ones with an `x`.
-- **`with_structured_output` errors** — the Kimchi endpoint must support tool calling for the configured model. The `minimax-m2.7` model in the Kimchi catalog advertises `tool_call: true`, which is what the relevance grader relies on.
+- **Pydantic / invalid JSON grader errors** — fixed by using a text-only yes/no grader parser instead of strict structured output. Pull the latest code if you still see this.
 - **First run is slow** — the embedding model is downloaded the first time it is used. Subsequent runs are fast.
-- **Stale vectors after changing the embedding model** — open the sidebar and click "Reset Chroma Cloud collection", then re-submit a question so the collection is re-created.
+- **Stale vectors after changing the embedding model** — open the sidebar and click "Reset Chroma Cloud collection", then upload and index PDFs again.
 - **`TAVILY_API_KEY` missing** — the app will still answer from the vector store, but the web-search fallback will fail. Set the key in `.env` for full corrective behavior.

@@ -5,8 +5,9 @@ import streamlit as st
 from agent_graph import build_graph
 from guardrails import apply_guardrails
 from vector_store import (
-    KNOWLEDGE_BASE_URLS,
+    CHROMA_COLLECTION_NAME,
     cached_build_vector_store,
+    index_uploaded_pdfs,
     reset_chroma_cloud_collection,
 )
 
@@ -53,27 +54,79 @@ def _render_sidebar():
             )
 
         st.divider()
-        st.header("Knowledge Base")
-        for url in KNOWLEDGE_BASE_URLS:
-            st.markdown(f"- {url}")
-
-        st.divider()
         st.header("Chroma Cloud")
-        st.caption("Collection: `rag-chroma`")
+        st.caption(f"Collection: `{CHROMA_COLLECTION_NAME}`")
 
         if st.button("Reset Chroma Cloud collection", type="secondary"):
             try:
                 reset_chroma_cloud_collection()
                 cached_build_vector_store.clear()
-                st.success("Collection deleted. Reload the page to rebuild.")
+                st.session_state.retriever = None
+                st.session_state.indexed_pdf_names = []
+                st.session_state.chunk_count = 0
+                st.success("Collection deleted. Upload PDFs and index again.")
             except Exception as exc:
                 st.error(f"Could not reset collection: {exc}")
 
         st.divider()
         st.caption(
-            "Pipeline: retrieve from Chroma Cloud, grade documents, fall back to "
+            "Pipeline: upload PDFs, index them in Chroma Cloud, retrieve, grade documents, fall back to "
             "Tavily web search if nothing is relevant, then generate an answer."
         )
+
+
+def _render_pdf_indexer():
+    st.markdown("### 1. Upload and index PDFs")
+    uploaded_pdfs = st.file_uploader(
+        "Upload PDF files to use as your knowledge base",
+        type=["pdf"],
+        accept_multiple_files=True,
+    )
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        index_clicked = st.button("Index uploaded PDFs", type="primary")
+        load_existing_clicked = st.button("Load existing Chroma collection", type="secondary")
+    with col2:
+        if st.session_state.get("indexed_pdf_names"):
+            names = ", ".join(st.session_state.indexed_pdf_names)
+            chunks = st.session_state.get("chunk_count", 0)
+            st.success(f"Indexed {len(st.session_state.indexed_pdf_names)} PDF(s), {chunks} chunks: {names}")
+        elif st.session_state.get("retriever") is not None:
+            st.success("Loaded existing Chroma Cloud collection.")
+
+    if load_existing_clicked:
+        retriever = cached_build_vector_store()
+        if retriever is None:
+            st.warning("No existing PDF collection found. Upload PDFs and index them first.")
+        else:
+            st.session_state.retriever = retriever
+            st.success("Existing Chroma Cloud collection loaded.")
+            st.rerun()
+
+    if not index_clicked:
+        return
+
+    if not uploaded_pdfs:
+        st.warning("Please upload at least one PDF before indexing.")
+        return
+
+    status_box = st.status("Indexing uploaded PDFs...", expanded=True)
+
+    def progress_cb(message: str):
+        status_box.update(label=message)
+
+    try:
+        retriever, chunk_count = index_uploaded_pdfs(uploaded_pdfs, progress_cb=progress_cb)
+        cached_build_vector_store.clear()
+        st.session_state.retriever = retriever
+        st.session_state.indexed_pdf_names = [file.name for file in uploaded_pdfs]
+        st.session_state.chunk_count = chunk_count
+        status_box.update(label="PDF knowledge base indexed", state="complete")
+        st.rerun()
+    except Exception as exc:
+        status_box.update(label="PDF indexing failed", state="error")
+        st.error(f"Failed to index PDFs: {exc}")
 
 
 def _render_trace(trace: list[str]):
@@ -107,7 +160,7 @@ def _render_used_documents(docs: list[str], title: str):
 def main():
     st.title("Corrective RAG Agent")
     st.markdown(
-        "Ask a question. The agent first searches a **Chroma Cloud** vector store. "
+        "Upload PDFs, then ask a question. The agent first searches your **Chroma Cloud** vector store. "
         "If no chunk is relevant, it rewrites the query and runs a **Tavily** web search "
         "before generating the final answer."
     )
@@ -117,6 +170,15 @@ def main():
 
     if "history" not in st.session_state:
         st.session_state.history = []
+    if "retriever" not in st.session_state:
+        st.session_state.retriever = None
+    if "indexed_pdf_names" not in st.session_state:
+        st.session_state.indexed_pdf_names = []
+    if "chunk_count" not in st.session_state:
+        st.session_state.chunk_count = 0
+
+    _render_pdf_indexer()
+    st.markdown("### 2. Ask a question")
 
     with st.form("question_form", clear_on_submit=False):
         question = st.text_input(
@@ -155,7 +217,11 @@ def main():
         sanitized_question = guardrail_result["sanitized_question"]
         pii_stripped = guardrail_result["pii_stripped"]
 
-        retriever = cached_build_vector_store()
+        retriever = st.session_state.get("retriever")
+        if retriever is None:
+            st.warning("Upload and index at least one PDF before asking questions.")
+            st.stop()
+
         graph = build_graph()
 
         with st.spinner("Running the corrective RAG pipeline..."):

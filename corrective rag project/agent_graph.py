@@ -1,6 +1,6 @@
 import os
+import re
 from typing_extensions import TypedDict
-from pydantic import BaseModel, Field
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -44,12 +44,6 @@ class SharedState(TypedDict, total=False):
     used_web_search: bool
 
 
-class GradeDocuments(BaseModel):
-    binary_score: str = Field(
-        description="Documents are relevant to the question, 'yes' or 'no'"
-    )
-
-
 def get_model(shared_state: SharedState) -> SharedState:
     api_key = os.getenv("KIMCHI_API_KEY")
     if not api_key:
@@ -69,6 +63,21 @@ def get_model(shared_state: SharedState) -> SharedState:
     return shared_state
 
 
+def _parse_relevance_grade(raw_response: str) -> bool:
+    cleaned = re.sub(r"<think>.*?</think>", "", raw_response, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = cleaned.strip().lower()
+
+    json_match = re.search(r'"binary_score"\s*:\s*"(yes|no)"', cleaned)
+    if json_match:
+        return json_match.group(1) == "yes"
+
+    score_match = re.search(r"\b(yes|no)\b", cleaned)
+    if score_match:
+        return score_match.group(1) == "yes"
+
+    return False
+
+
 def get_relevant_documents(shared_state: SharedState) -> SharedState:
     question = shared_state["question"]
     vector_store = shared_state["vector_store"]
@@ -86,25 +95,35 @@ def grade_and_filter_documents(shared_state: SharedState) -> SharedState:
     question = shared_state["question"]
     model = shared_state["model"]
     documents = shared_state["relevant_documents"]
-    structured_llm_grader = model.with_structured_output(GradeDocuments)
 
     grade_prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", GRADE_DOCUMENTS_PROMPT),
+            (
+                "system",
+                GRADE_DOCUMENTS_PROMPT
+                + "\nReturn only one word: yes or no. Do not include reasoning, XML tags, markdown, or JSON.",
+            ),
             ("human", "Retrieved document: \n\n {document} \n\n User question: {question}"),
         ]
     )
 
-    retrieval_grader = grade_prompt | structured_llm_grader
+    retrieval_grader = grade_prompt | model | StrOutputParser()
 
     filtered_documents = []
     grade_log = []
     for idx, document in enumerate(documents, start=1):
-        grader_response = retrieval_grader.invoke(
+        raw_grade = retrieval_grader.invoke(
             {"question": question, "document": document}
         )
-        is_relevant = grader_response.binary_score.lower() == "yes"
-        grade_log.append({"index": idx, "relevant": is_relevant, "snippet": document[:200]})
+        is_relevant = _parse_relevance_grade(raw_grade)
+        grade_log.append(
+            {
+                "index": idx,
+                "relevant": is_relevant,
+                "snippet": document[:200],
+                "raw_grade": raw_grade[:200],
+            }
+        )
         if is_relevant:
             filtered_documents.append(document)
 
