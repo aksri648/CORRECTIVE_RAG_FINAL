@@ -77,9 +77,10 @@ corrective rag project/
 
 | File | Purpose |
 | --- | --- |
-| `app.py` | Streamlit entrypoint. Renders the sidebar (env status, models), PDF upload/index controls, the question form, per-turn answers, the workflow trace, and the graded/retrieved documents. |
+| `app.py` | Streamlit entrypoint. Renders the sidebar (env status, models), PDF upload/index controls (with optional EasyOCR), the question form, per-turn answers, the workflow trace, and the graded/retrieved documents. |
 | `agent_graph.py` | Defines `SharedState` and the LangGraph nodes: `get_model`, `get_relevant_documents`, `grade_and_filter_documents`, `decide_to_generate` (conditional edge), `transform_query`, `perform_web_search`, `generate_answer_from_documents`. |
 | `vector_store.py` | Builds a `chromadb.CloudClient`, indexes uploaded PDFs into the `rag-pdf-chroma` collection with BGE embeddings, exposes existing retrievers, and handles collection reset. |
+| `ocr.py` | Loads PDFs with auto-detected text vs. image-based fallback, and OCRs scanned pages with EasyOCR. Caches the EasyOCR reader for performance. |
 | `guardrails.py` | Two-stage input guardrail: regex-based prompt-injection detection (40+ keywords + 30+ patterns) and PII redaction (14 categories) applied before any LLM call. |
 | `run.py` | Launches Streamlit headless on `STREAMLIT_PORT` and opens an ngrok tunnel to it, printing the public URL. |
 | `prompts.py` | Two system prompts — `GRADE_DOCUMENTS_PROMPT` and `QUESTION_REWRITER_PROMPT`. |
@@ -110,7 +111,7 @@ source .venv/bin/activate          # macOS / Linux
 pip install -r requirements.txt
 ```
 
-The first run will download `BAAI/bge-small-en-v1.5` (~33 MB) into the HuggingFace cache.
+The first run will download `BAAI/bge-small-en-v1.5` (~33 MB) into the HuggingFace cache. If you plan to use OCR, also install the system dependency `poppler-utils` (e.g. `apt-get install -y poppler-utils`) — `pdf2image` requires it. EasyOCR will download its English model (~100 MB) the first time OCR is triggered.
 
 ### 4. Configure environment variables
 
@@ -180,7 +181,7 @@ Open the **`colab_setup.ipynb`** notebook at the repo root directly in Google Co
 4. Interrupt the cell (▶️ ■) to stop both Streamlit and the ngrok tunnel cleanly.
 
 The notebook:
-- Installs `pyngrok` and the project's `requirements.txt`.
+- Installs `poppler-utils` (system dep for OCR) and the project's Python requirements.
 - Clones this repo into the Colab VM (skipped on re-runs).
 - Loads the six secrets via `google.colab.userdata`, writes them to `.env`, and runs `run.py`.
 
@@ -236,7 +237,7 @@ All settings are read from environment variables (loaded by `python-dotenv`).
 The UI has three regions:
 
 1. **Sidebar** — environment variable status (which keys are present), the active LLM / embedding model, the active Chroma collection, and a "Reset Chroma Cloud collection" button.
-2. **PDF indexer** — upload one or more PDFs, click "Index uploaded PDFs", or load an existing Chroma collection.
+2. **PDF indexer** — upload one or more PDFs, optionally check **Force OCR with EasyOCR** (for scanned / image-based PDFs), click "Index uploaded PDFs", or load an existing Chroma collection.
 3. **Question form** — a single text input with an "Ask the agent" submit button. It is valid only after PDF indexing or existing collection loading.
 4. **History** — every submitted question is appended to session history. Each turn shows the final answer, source path (Chroma or Tavily), workflow trace, graded documents, and retrieved context chunks.
 
@@ -249,3 +250,4 @@ The UI has three regions:
 - **First run is slow** — the embedding model is downloaded the first time it is used. Subsequent runs are fast.
 - **Stale vectors after changing the embedding model** — open the sidebar and click "Reset Chroma Cloud collection", then upload and index PDFs again.
 - **`TAVILY_API_KEY` missing** — the app will still answer from the vector store, but the web-search fallback will fail. Set the key in `.env` for full corrective behavior.
+- **OCR errors / empty chunks** — install `poppler-utils` on the host (`apt-get install -y poppler-utils` on Debian/Ubuntu, included in the Colab notebook). EasyOCR downloads its model the first time it is used; subsequent runs reuse the cache.

@@ -1,15 +1,16 @@
 import os
 import tempfile
-from typing import List
+from typing import Callable, List, Optional
 from dotenv import load_dotenv
 import streamlit as st
 
 import chromadb
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
+
+from ocr import load_pdf
 
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
@@ -45,7 +46,11 @@ def get_chroma_cloud_client() -> chromadb.CloudClient:
     )
 
 
-def _load_and_split_pdf_files(uploaded_files) -> List[Document]:
+def _load_and_split_pdf_files(
+    uploaded_files,
+    force_ocr: bool = False,
+    progress_cb: Optional[Callable[[str], None]] = None,
+) -> List[Document]:
     docs_list = []
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -54,9 +59,12 @@ def _load_and_split_pdf_files(uploaded_files) -> List[Document]:
             with open(pdf_path, "wb") as pdf_file:
                 pdf_file.write(uploaded_file.getbuffer())
 
-            pages = PyPDFLoader(pdf_path).load()
-            for page in pages:
-                page.metadata["source"] = uploaded_file.name
+            pages = load_pdf(
+                pdf_path,
+                uploaded_file.name,
+                force_ocr=force_ocr,
+                progress_cb=progress_cb,
+            )
             docs_list.extend(pages)
 
     text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
@@ -88,7 +96,7 @@ def get_existing_retriever(progress_cb=None):
     return vector_store.as_retriever()
 
 
-def index_uploaded_pdfs(uploaded_files, progress_cb=None):
+def index_uploaded_pdfs(uploaded_files, force_ocr: bool = False, progress_cb=None):
     if not uploaded_files:
         raise ValueError("Upload at least one PDF before indexing.")
 
@@ -99,8 +107,15 @@ def index_uploaded_pdfs(uploaded_files, progress_cb=None):
     reset_chroma_cloud_collection(show_warning=False)
 
     if progress_cb:
-        progress_cb(f"Loading and splitting {len(uploaded_files)} PDF file(s)...")
-    doc_splits = _load_and_split_pdf_files(uploaded_files)
+        progress_cb(
+            f"Loading and splitting {len(uploaded_files)} PDF file(s)"
+            f"{' (OCR mode)' if force_ocr else ' (auto-detect text vs. OCR)'}..."
+        )
+    doc_splits = _load_and_split_pdf_files(
+        uploaded_files,
+        force_ocr=force_ocr,
+        progress_cb=progress_cb,
+    )
 
     if not doc_splits:
         raise ValueError("No readable text was found in the uploaded PDFs.")

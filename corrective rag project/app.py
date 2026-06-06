@@ -91,9 +91,19 @@ def _render_pdf_indexer():
         if st.session_state.get("indexed_pdf_names"):
             names = ", ".join(st.session_state.indexed_pdf_names)
             chunks = st.session_state.get("chunk_count", 0)
-            st.success(f"Indexed {len(st.session_state.indexed_pdf_names)} PDF(s), {chunks} chunks: {names}")
+            ocr_used = st.session_state.get("ocr_used", False)
+            mode = "OCR" if ocr_used else "text extraction"
+            st.success(
+                f"Indexed {len(st.session_state.indexed_pdf_names)} PDF(s) "
+                f"via {mode}, {chunks} chunks: {names}"
+            )
         elif st.session_state.get("retriever") is not None:
             st.success("Loaded existing Chroma Cloud collection.")
+
+    force_ocr = st.checkbox(
+        "Force OCR with EasyOCR (for scanned / image-based PDFs — slower)",
+        value=False,
+    )
 
     if load_existing_clicked:
         retriever = cached_build_vector_store()
@@ -117,11 +127,16 @@ def _render_pdf_indexer():
         status_box.update(label=message)
 
     try:
-        retriever, chunk_count = index_uploaded_pdfs(uploaded_pdfs, progress_cb=progress_cb)
+        retriever, chunk_count = index_uploaded_pdfs(
+            uploaded_pdfs,
+            force_ocr=force_ocr,
+            progress_cb=progress_cb,
+        )
         cached_build_vector_store.clear()
         st.session_state.retriever = retriever
         st.session_state.indexed_pdf_names = [file.name for file in uploaded_pdfs]
         st.session_state.chunk_count = chunk_count
+        st.session_state.ocr_used = force_ocr
         status_box.update(label="PDF knowledge base indexed", state="complete")
         st.rerun()
     except Exception as exc:
@@ -176,6 +191,8 @@ def main():
         st.session_state.indexed_pdf_names = []
     if "chunk_count" not in st.session_state:
         st.session_state.chunk_count = 0
+    if "ocr_used" not in st.session_state:
+        st.session_state.ocr_used = False
 
     _render_pdf_indexer()
     st.markdown("### 2. Ask a question")
