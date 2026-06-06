@@ -80,6 +80,8 @@ corrective rag project/
 | `app.py` | Streamlit entrypoint. Renders the sidebar (env status, KB URLs, models), the question form, per-turn answers, the workflow trace, and the graded/retrieved documents. |
 | `agent_graph.py` | Defines `SharedState`, the `GradeDocuments` pydantic model, and seven LangGraph nodes: `get_model`, `get_relevant_documents`, `grade_and_filter_documents`, `decide_to_generate` (conditional edge), `transform_query`, `perform_web_search`, `generate_answer_from_documents`. |
 | `vector_store.py` | Builds a `chromadb.CloudClient`, creates the `rag-chroma` collection on first run by embedding the two knowledge-base URLs, and exposes a cached retriever (`@st.cache_resource`). Also handles collection reset. |
+| `guardrails.py` | Two-stage input guardrail: regex-based prompt-injection detection (40+ keywords + 30+ patterns) and PII redaction (14 categories) applied before any LLM call. |
+| `run.py` | Launches Streamlit headless on `STREAMLIT_PORT` and opens an ngrok tunnel to it, printing the public URL. |
 | `prompts.py` | Two system prompts — `GRADE_DOCUMENTS_PROMPT` and `QUESTION_REWRITER_PROMPT`. |
 | `requirements.txt` | All Python packages required to run the app. |
 | `.env.example` | Template for the API keys and tunables. |
@@ -122,6 +124,8 @@ Edit `.env` and fill in the values described in [Configuration](#configuration).
 
 ## Running the app
 
+### Local only
+
 ```bash
 streamlit run app.py
 ```
@@ -131,6 +135,30 @@ Streamlit will open the UI at `http://localhost:8501`. The first time you submit
 1. Connect to Chroma Cloud.
 2. If the `rag-chroma` collection does not exist, load the two knowledge-base URLs, split them into ~250-token chunks, embed them with BGE, and upload the vectors to Chroma Cloud.
 3. Cache the retriever for the rest of the session.
+
+### Public URL via ngrok (pyngrok)
+
+Set `NGROK_AUTH_TOKEN` in `.env` (get one free at https://dashboard.ngrok.com/get-started/your-authtoken) and run:
+
+```bash
+python run.py
+```
+
+The script prints something like:
+
+```
+================================================================
+  Public URL:  https://<random>.ngrok-free.app
+  Local URL:   http://localhost:8501
+================================================================
+  Press Ctrl+C to stop both Streamlit and the ngrok tunnel.
+```
+
+Optional env vars:
+- `NGROK_DOMAIN` — pin to a reserved static domain (paid plan).
+- `STREAMLIT_PORT` — change the local port (default `8501`).
+
+On `Ctrl+C` the script terminates Streamlit and disconnects the ngrok tunnel cleanly.
 
 ---
 
@@ -168,6 +196,9 @@ All settings are read from environment variables (loaded by `python-dotenv`).
 | `CHROMA_API_KEY` | — (required) | Chroma Cloud API key. |
 | `CHROMA_TENANT` | — (required) | Chroma Cloud tenant ID. |
 | `CHROMA_DATABASE` | — (required) | Chroma Cloud database name. |
+| `NGROK_AUTH_TOKEN` | — (optional, for public URL) | ngrok authtoken used by `run.py`. |
+| `NGROK_DOMAIN` | _empty_ | Optional reserved ngrok domain (paid plan). |
+| `STREAMLIT_PORT` | `8501` | Local port Streamlit binds to; the ngrok tunnel points here. |
 
 > **Important:** the embedding model used at *index* time must match the one used at *query* time. If you change `EMBEDDING_MODEL`, reset the Chroma Cloud collection from the sidebar so vectors are re-embedded with the new model.
 
