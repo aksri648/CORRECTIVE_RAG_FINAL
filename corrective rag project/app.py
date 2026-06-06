@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 import streamlit as st
 
@@ -144,6 +145,13 @@ def _render_pdf_indexer():
         st.error(f"Failed to index PDFs: {exc}")
 
 
+def _strip_think_blocks(text: str) -> str:
+    if not text:
+        return text
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()
+
+
 def _render_trace(trace: list[str]):
     if not trace:
         return
@@ -283,7 +291,7 @@ def main():
                 st.code(turn.get("sanitized_question", turn["question"]))
 
         result = turn["result"]
-        answer = result.get("agent_response", "No answer was produced.")
+        answer = _strip_think_blocks(result.get("agent_response", "No answer was produced."))
         used_web = result.get("used_web_search", False)
 
         if used_web:
