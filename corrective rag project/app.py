@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import streamlit as st
 
 from agent_graph import build_graph
-from guardrails import apply_guardrails
+from guardrails import INJECTION_RESPONSE, apply_guardrails, second_pass_classifier
 from vector_store import (
     CHROMA_COLLECTION_NAME,
     cached_build_vector_store,
@@ -243,6 +243,15 @@ def main():
                 "results. If they disagree, the answer is replaced with a web-sourced one."
             ),
         )
+        use_ml_classifier = st.checkbox(
+            "Use ML-based safety classifier for borderline inputs (catches paraphrased prompt injections)",
+            value=False,
+            help=(
+                "When ON, messages that pass regex guardrails but look suspicious (long padding, "
+                "system-prompt probing, code blocks, hidden Unicode) are sent to the LLM for a "
+                "second-pass safety check. Adds latency and cost only on suspicious inputs."
+            ),
+        )
         submitted = st.form_submit_button("Ask the agent", type="primary")
 
     if submitted:
@@ -274,6 +283,27 @@ def main():
 
         sanitized_question = guardrail_result["sanitized_question"]
         pii_stripped = guardrail_result["pii_stripped"]
+
+        if use_ml_classifier and guardrail_result.get("needs_ml_check"):
+            is_safe, _verdict = second_pass_classifier(question)
+            if not is_safe:
+                st.session_state.history.append(
+                    {
+                        "question": question,
+                        "result": {
+                            "agent_response": INJECTION_RESPONSE,
+                            "used_web_search": False,
+                            "trace": [
+                                "Prompt-injection guardrail triggered. Request blocked before reaching the LLM.",
+                            ],
+                            "graded_documents": [],
+                            "relevant_documents": [],
+                        },
+                        "blocked": True,
+                        "pii_stripped": [],
+                    }
+                )
+                st.rerun()
 
         retriever = st.session_state.get("retriever")
         if retriever is None:

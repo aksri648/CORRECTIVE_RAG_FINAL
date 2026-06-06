@@ -1,5 +1,8 @@
+import os
 import re
 from typing import Tuple
+
+from prompts import CLASSIFIER_PROMPT
 
 
 PROMPT_INJECTION_PATTERNS = [
@@ -123,6 +126,88 @@ PII_PATTERNS = {
 INJECTION_RESPONSE = "You are not allowed to change my property"
 
 
+SOFT_SUSPICION_PATTERNS = [
+    r"\bsystem\s+prompt\b",
+    r"\bsystem\s+instructions?\b",
+    r"\byour\s+instructions?\b",
+    r"\byour\s+rules?\b",
+    r"\bforget\s+about\b",
+    r"\bwithout\s+(?:any\s+)?rules?\b",
+    r"\bplease\s+ignore\b",
+    r"\bcan\s+you\s+(?:share|show|print|reveal|describe|explain)\b.{0,40}\b(?:instructions?|prompt|rules?|configuration)\b",
+    r"```",
+    r"\.{30,}",
+    r"[\u200B-\u200F\uFEFF]{5,}",
+    r"[\x00-\x08\x0B-\x0C\x0E-\x1F]{5,}",
+]
+
+SOFT_SUSPICION_LENGTH = 250
+
+
+def looks_suspicious(text: str) -> bool:
+    """Trigger condition for variant B of the second-pass ML classifier.
+
+    Returns True when the input shows soft signs of adversarial intent that
+    the strict regex guardrails did not catch: long inputs (likely padding),
+    probing vocabulary, code blocks, repeated punctuation, or hidden Unicode.
+    """
+    if not text:
+        return False
+    if len(text) > SOFT_SUSPICION_LENGTH:
+        return True
+    for pattern in SOFT_SUSPICION_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+    return False
+
+
+def second_pass_classifier(text: str) -> Tuple[bool, str]:
+    """Run a lightweight LLM-based safety check on a user message.
+
+    Returns (is_safe, verdict). The verdict is for server-side logging only
+    and must not be surfaced to end users (per UI design).
+
+    The classifier fails OPEN: if the API key is missing or the call errors,
+    the input is treated as safe so the agent does not silently break.
+    """
+    api_key = os.getenv("KIMCHI_API_KEY")
+    if not api_key:
+        return True, "skipped_no_api_key"
+
+    try:
+        from langchain_core.output_parsers import StrOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=os.getenv("LLM_MODEL", "minimax-m2.7"),
+            temperature=0,
+            base_url=os.getenv(
+                "KIMCHI_BASE_URL", "https://llm.kimchi.dev/openai/v1"
+            ),
+            api_key=api_key,
+        )
+        prompt = ChatPromptTemplate.from_messages(
+            [("system", CLASSIFIER_PROMPT), ("human", "{input}")]
+        )
+        chain = prompt | llm | StrOutputParser()
+        raw = chain.invoke({"input": text})
+    except Exception as exc:
+        return True, f"classifier_error:{type(exc).__name__}"
+
+    cleaned = re.sub(
+        r"<think>.*?</think>", "", raw or "", flags=re.IGNORECASE | re.DOTALL
+    ).strip().lower()
+
+    if not cleaned:
+        return True, "empty_response"
+
+    is_safe = cleaned == "safe" or (
+        cleaned.startswith("safe") and "unsafe" not in cleaned
+    )
+    return is_safe, cleaned
+
+
 def detect_prompt_injection(text: str) -> Tuple[bool, list[str]]:
     if not text:
         return False, []
@@ -178,9 +263,11 @@ def apply_guardrails(question: str) -> dict:
             "sanitized_question": question,
             "pii_stripped": [],
             "injection_hits": injection_hits,
+            "needs_ml_check": False,
         }
 
     sanitized_question, pii_stripped = strip_pii(question)
+    needs_ml_check = looks_suspicious(question)
 
     return {
         "blocked": False,
@@ -188,4 +275,5 @@ def apply_guardrails(question: str) -> dict:
         "sanitized_question": sanitized_question,
         "pii_stripped": pii_stripped,
         "injection_hits": [],
+        "needs_ml_check": needs_ml_check,
     }
