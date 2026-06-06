@@ -199,9 +199,10 @@ The LangGraph workflow in `agent_graph.py` is:
 | 2 | `get_relevant_documents` | Calls the Chroma Cloud retriever with the user's question. |
 | 3 | `grade_and_filter_documents` | Uses the LLM to return `yes`/`no`, then a robust parser strips `<think>...</think>` and extracts the grade without strict JSON parsing. Only relevant chunks are kept. |
 | 4 | `decide_to_generate` | Conditional edge. If at least one chunk is relevant → `generate`. Otherwise → `transform_query`. |
-| 5 | `transform_query` | Rewrites the question to be more web-search-friendly. |
-| 6 | `perform_web_search` | Calls `TavilySearch` and uses the returned snippets as new context. |
-| 7 | `generate_answer_from_documents` | Uses the inlined RAG prompt and generates the final answer with the kept context. |
+| 5 | `transform_query` | Rewrites the question to be more web-search-friendly (uses the strict `WEB_SEARCH_QUESTION_REWRITER_PROMPT`). |
+| 6 | `perform_web_search` | Calls `TavilySearch` (max 5, advanced depth, with synthesized answer) and uses the returned snippets as new context. |
+| 7 | `generate_answer_from_documents` | Picks the prompt by path: `WEB_SEARCH_RAG_PROMPT` when `used_web_search=True`, otherwise `RAG_PROMPT`. |
+| 8 | `validate_response` | (Optional) cross-checks the RAG answer against fresh Tavily results via LLM-as-judge. Rejects and triggers web search if inconsistent or if the RAG answer signals uncertainty. |
 
 Every node appends a human-readable line to `state["trace"]`, which the Streamlit UI displays in the "Workflow trace" expander.
 
@@ -239,7 +240,7 @@ The UI has three regions:
 1. **Sidebar** — environment variable status (which keys are present), the active LLM / embedding model, the active Chroma collection, and a "Reset Chroma Cloud collection" button.
 2. **PDF indexer** — upload one or more PDFs, optionally check **Force OCR with EasyOCR** (for scanned / image-based PDFs), click "Index uploaded PDFs", or load an existing Chroma collection.
 3. **Question form** — a single text input with an "Ask the agent" submit button. It is valid only after PDF indexing or existing collection loading.
-4. **History** — every submitted question is appended to session history. Each turn shows the final answer, source path (Chroma or Tavily), workflow trace, graded documents, and retrieved context chunks.
+4. **History** — every submitted question is appended to session history. Each turn shows the final answer, source path (Chroma or Tavily), validation status (consistent / inconsistent / uncertainty / skipped), workflow trace, graded documents, and retrieved context chunks. The "Cross-validate RAG answer with Tavily" checkbox in the form toggles the validator node per question.
 
 ---
 

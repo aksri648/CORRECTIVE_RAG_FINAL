@@ -160,6 +160,31 @@ def _render_trace(trace: list[str]):
             st.markdown(f"**{i}.** {step}")
 
 
+_VALIDATION_LABELS = {
+    "consistent": ("Cross-validated against Tavily: consistent.", "success"),
+    "inconsistent": ("Cross-validation found a discrepancy; answer was regenerated from web search.", "warning"),
+    "uncertainty": ("RAG answer signalled uncertainty; fell back to web search.", "warning"),
+    "search_failed": ("Cross-validation web search failed; RAG answer kept.", "info"),
+    "no_web_data": ("No web snippets to cross-check; RAG answer kept.", "info"),
+    "skipped_web": ("Cross-validation skipped (answer was already from web search).", "info"),
+    "disabled": ("Cross-validation disabled for this question.", "info"),
+}
+
+
+def _render_validation_status(status: str, answer: str, used_web: bool):
+    if used_web and status not in {"inconsistent", "uncertainty"}:
+        return
+    label, level = _VALIDATION_LABELS.get(status, (None, None))
+    if not label:
+        return
+    fn = {
+        "success": st.success,
+        "warning": st.warning,
+        "info": st.info,
+    }[level]
+    fn(label)
+
+
 def _render_graded_documents(graded: list[dict]):
     if not graded:
         return
@@ -210,6 +235,14 @@ def main():
             "Your question",
             placeholder="e.g. What are word embeddings and how do they work?",
         )
+        validate_rag_answer = st.checkbox(
+            "Cross-validate RAG answer with Tavily (slower but more accurate)",
+            value=True,
+            help=(
+                "When ON, the agent cross-checks the RAG answer against fresh Tavily "
+                "results. If they disagree, the answer is replaced with a web-sourced one."
+            ),
+        )
         submitted = st.form_submit_button("Ask the agent", type="primary")
 
     if submitted:
@@ -255,6 +288,7 @@ def main():
                     "question": sanitized_question,
                     "vector_store": retriever,
                     "trace": [],
+                    "validate_rag_answer": validate_rag_answer,
                 }
             )
 
@@ -263,6 +297,7 @@ def main():
                 "question": question,
                 "sanitized_question": sanitized_question,
                 "pii_stripped": pii_stripped,
+                "validate_rag_answer": validate_rag_answer,
                 "result": result,
                 "blocked": False,
             }
@@ -293,11 +328,15 @@ def main():
         result = turn["result"]
         answer = _strip_think_blocks(result.get("agent_response", "No answer was produced."))
         used_web = result.get("used_web_search", False)
+        validation_status = result.get("validation_status")
 
         if used_web:
             st.warning("Answered using the web-search fallback path.")
         else:
             st.success("Answered using the Chroma Cloud knowledge base.")
+
+        if turn.get("validate_rag_answer") and validation_status and not used_web:
+            _render_validation_status(validation_status, answer, used_web)
 
         st.markdown("### Answer")
         st.write(answer)

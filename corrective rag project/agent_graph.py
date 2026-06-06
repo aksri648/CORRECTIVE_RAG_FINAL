@@ -10,6 +10,7 @@ from langgraph.graph import END, StateGraph, START
 
 from prompts import (
     GRADE_DOCUMENTS_PROMPT,
+    VALIDATOR_PROMPT,
     WEB_SEARCH_ANSWER_PROMPT,
     WEB_SEARCH_QUESTION_REWRITER_PROMPT,
 )
@@ -60,6 +61,8 @@ class SharedState(TypedDict, total=False):
     model: ChatOpenAI
     trace: list[str]
     used_web_search: bool
+    validate_rag_answer: bool
+    validation_status: str
 
 
 def get_model(shared_state: SharedState) -> SharedState:
@@ -262,6 +265,116 @@ def perform_web_search(shared_state: SharedState) -> SharedState:
     return shared_state
 
 
+_UNCERTAINTY_PATTERNS = [
+    r"i don't know",
+    r"i do not know",
+    r"i couldn't find",
+    r"i could not find",
+    r"i can't find",
+    r"cannot find",
+    r"no information",
+    r"not enough information",
+    r"not available",
+    r"i'm not sure",
+    r"i am not sure",
+    r"cannot answer",
+    r"can't answer",
+    r"unable to answer",
+    r"insufficient (?:context|information|data)",
+    r"the (?:context|provided|available) (?:does not|doesn't) (?:contain|provide|include)",
+]
+
+
+def _looks_like_uncertainty(text: str) -> bool:
+    if not text:
+        return True
+    lowered = text.lower()
+    return any(re.search(p, lowered) for p in _UNCERTAINTY_PATTERNS)
+
+
+def _run_validator_web_search(question: str) -> list[str]:
+    validator_tool = TavilySearch(max_results=3, search_depth="basic")
+    try:
+        web_results = validator_tool.invoke({"query": question})
+    except TypeError:
+        web_results = validator_tool.invoke(question)
+    results_list = (
+        web_results.get("results", []) if isinstance(web_results, dict) else web_results or []
+    )
+    return [item.get("content", "") for item in results_list if item.get("content")]
+
+
+def validate_response(shared_state: SharedState) -> str:
+    if not shared_state.get("validate_rag_answer", True):
+        shared_state.setdefault("trace", []).append(
+            "Validator: disabled by user, keeping current answer."
+        )
+        shared_state["validation_status"] = "disabled"
+        return "accept"
+
+    if shared_state.get("used_web_search"):
+        shared_state.setdefault("trace", []).append(
+            "Validator: skipped (answer was already sourced from web search)."
+        )
+        shared_state["validation_status"] = "skipped_web"
+        return "accept"
+
+    rag_answer = shared_state.get("agent_response", "")
+    question = shared_state.get("original_question") or shared_state["question"]
+
+    if _looks_like_uncertainty(rag_answer):
+        shared_state.setdefault("trace", []).append(
+            "Validator: RAG answer signals uncertainty. Re-running with web search."
+        )
+        shared_state["validation_status"] = "uncertainty"
+        return "reject"
+
+    try:
+        web_snippets = _run_validator_web_search(question)
+    except Exception as exc:
+        shared_state.setdefault("trace", []).append(
+            f"Validator: web search failed ({exc}). Keeping RAG answer."
+        )
+        shared_state["validation_status"] = "search_failed"
+        return "accept"
+
+    if not web_snippets:
+        shared_state.setdefault("trace", []).append(
+            "Validator: no web snippets returned, keeping RAG answer."
+        )
+        shared_state["validation_status"] = "no_web_data"
+        return "accept"
+
+    judge_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", VALIDATOR_PROMPT),
+            (
+                "human",
+                "Question: {question}\n\n"
+                "RAG answer: {rag_answer}\n\n"
+                "Web snippets: {web_snippets}\n\n"
+                "Is the RAG answer consistent with the web snippets?",
+            ),
+        ]
+    )
+    judge_chain = judge_prompt | shared_state["model"] | StrOutputParser()
+    verdict = judge_chain.invoke(
+        {
+            "question": question,
+            "rag_answer": rag_answer,
+            "web_snippets": "\n\n".join(web_snippets),
+        }
+    )
+
+    is_consistent = _parse_relevance_grade(verdict)
+    shared_state["validation_status"] = "consistent" if is_consistent else "inconsistent"
+    shared_state.setdefault("trace", []).append(
+        f"Validator: cross-checked against {len(web_snippets)} web snippet(s) "
+        f"-> {'CONSISTENT' if is_consistent else 'INCONSISTENT'}."
+    )
+    return "accept" if is_consistent else "reject"
+
+
 def build_graph():
     workflow = StateGraph(SharedState)
 
@@ -285,6 +398,13 @@ def build_graph():
     )
     workflow.add_edge("transform_query", "perform_web_search")
     workflow.add_edge("perform_web_search", "generate_answer_from_documents")
-    workflow.add_edge("generate_answer_from_documents", END)
+    workflow.add_conditional_edges(
+        "generate_answer_from_documents",
+        validate_response,
+        {
+            "accept": END,
+            "reject": "perform_web_search",
+        },
+    )
 
     return workflow.compile()

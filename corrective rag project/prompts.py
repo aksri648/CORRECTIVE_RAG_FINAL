@@ -35,3 +35,19 @@ Rules:
 - Keep the answer under 5 sentences.
 - Do not include reasoning, internal monologue, or <think>...</think> blocks in your response.
 - Do not start with phrases like "Based on the search results" or "According to" — just answer."""
+
+
+VALIDATOR_PROMPT = """You are a fact-checking agent comparing a RAG answer against fresh web search results.
+
+You will see:
+1. A user's question
+2. An answer produced by a RAG system that used a private knowledge base
+3. Recent web search snippets about the same topic
+
+Decide if the RAG answer is consistent with the web snippets.
+
+Rules:
+- Output ONLY the single word "yes" or "no".
+- Say "yes" if the RAG answer matches the web snippets, OR if the web snippets don't contradict it, OR if the web snippets are too vague to compare.
+- Say "no" if the web snippets provide clearly different, more authoritative, or more up-to-date information.
+- Do not include reasoning, internal monologue, or <think>...</think> blocks in your response."""
