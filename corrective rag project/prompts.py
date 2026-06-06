@@ -10,3 +10,28 @@ QUESTION_REWRITER_PROMPT = """
     You a question re-writer that converts an input question to a better version that is optimized
     for web search. Look at the input and try to reason about the underlying semantic intent / meaning.
 """
+
+WEB_SEARCH_QUESTION_REWRITER_PROMPT = """You optimize questions for web search engines.
+
+Rewrite the user's question into a single, concise, search-engine-friendly query that captures the user's information need.
+
+Rules:
+- Output ONLY the rewritten query, nothing else.
+- Do not add explanations, prefixes like "Search:", "Rewritten:", or commentary.
+- Do not answer the question.
+- Do not ask the question back.
+- Keep it under 15 words."""
+
+
+WEB_SEARCH_ANSWER_PROMPT = """You are a research analyst. The user asked a real-world factual question and the system retrieved the latest web search results to answer it.
+
+Use the web search snippets below to answer the user's original question directly and concisely.
+
+Rules:
+- Give a direct, factual answer in the first sentence. Do NOT rephrase or rewrite the question.
+- Prefer specific names, companies, numbers, dates, and citations from the snippets.
+- If multiple competitors / options are mentioned, list the top 2-3 with one-line context each.
+- If the snippets do not contain enough information, say: "I could not find a definitive answer in the current web search results."
+- Keep the answer under 5 sentences.
+- Do not include reasoning, internal monologue, or <think>...</think> blocks in your response.
+- Do not start with phrases like "Based on the search results" or "According to" — just answer."""

@@ -8,7 +8,11 @@ from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
 from langgraph.graph import END, StateGraph, START
 
-from prompts import GRADE_DOCUMENTS_PROMPT, QUESTION_REWRITER_PROMPT
+from prompts import (
+    GRADE_DOCUMENTS_PROMPT,
+    WEB_SEARCH_ANSWER_PROMPT,
+    WEB_SEARCH_QUESTION_REWRITER_PROMPT,
+)
 
 
 KIMCHI_BASE_URL = os.getenv("KIMCHI_BASE_URL", "https://llm.kimchi.dev/openai/v1")
@@ -33,8 +37,22 @@ RAG_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
+WEB_SEARCH_RAG_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", WEB_SEARCH_ANSWER_PROMPT),
+        (
+            "human",
+            "Original user question: {question}\n\n"
+            "Web search snippets:\n{context}\n\n"
+            "Answer concisely:",
+        ),
+    ]
+)
+
+
 class SharedState(TypedDict, total=False):
     question: str
+    original_question: str
     agent_response: str
     vector_store: object
     relevant_documents: list[str]
@@ -137,10 +155,11 @@ def grade_and_filter_documents(shared_state: SharedState) -> SharedState:
 
 def generate_answer_from_documents(shared_state: SharedState) -> SharedState:
     model = shared_state["model"]
-    question = shared_state["question"]
     documents = shared_state["relevant_documents"]
+    question = shared_state.get("original_question") or shared_state["question"]
 
-    rag_chain = RAG_PROMPT | model | StrOutputParser()
+    prompt = WEB_SEARCH_RAG_PROMPT if shared_state.get("used_web_search") else RAG_PROMPT
+    rag_chain = prompt | model | StrOutputParser()
     model_response = rag_chain.invoke({"context": documents, "question": question})
 
     shared_state["agent_response"] = model_response
@@ -167,35 +186,78 @@ def transform_query(shared_state: SharedState) -> SharedState:
     question = shared_state["question"]
     model = shared_state["model"]
 
+    if not shared_state.get("original_question"):
+        shared_state["original_question"] = question
+
     re_write_prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", QUESTION_REWRITER_PROMPT),
-            (
-                "human",
-                "Here is the initial question: \n\n {question} \n Formulate an improved question.",
-            ),
+            ("system", WEB_SEARCH_QUESTION_REWRITER_PROMPT),
+            ("human", "User question: {question}\n\nOptimized search query:"),
         ]
     )
     question_rewriter = re_write_prompt | model | StrOutputParser()
-    better_question = question_rewriter.invoke({"question": question})
+    raw_output = question_rewriter.invoke({"question": question})
+
+    better_question = _clean_rewritten_query(raw_output, fallback=question)
 
     shared_state["question"] = better_question
-    shared_state.setdefault("trace", []).append(f"Rewrote question to: '{better_question}'")
+    shared_state.setdefault("trace", []).append(
+        f"Rewrote question to: '{better_question}'"
+    )
     return shared_state
+
+
+def _clean_rewritten_query(raw_output: str, fallback: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", raw_output or "", flags=re.IGNORECASE | re.DOTALL)
+    cleaned = cleaned.strip().strip('"').strip("'").strip()
+
+    for prefix in (
+        "optimized search query:",
+        "rewritten question:",
+        "rewritten query:",
+        "search query:",
+        "query:",
+        "improved question:",
+    ):
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip().strip('"').strip("'").strip()
+
+    first_line = cleaned.splitlines()[0].strip() if cleaned else ""
+    candidate = first_line or cleaned or fallback
+    return candidate[:300]
 
 
 def perform_web_search(shared_state: SharedState) -> SharedState:
     question = shared_state["question"]
-    web_search_tool = TavilySearch(max_results=3)
+    web_search_tool = TavilySearch(
+        max_results=5,
+        search_depth="advanced",
+        include_answer="advanced",
+    )
 
-    web_results = web_search_tool.invoke({"query": question})
-    results_list = web_results.get("results", []) if isinstance(web_results, dict) else web_results
+    try:
+        web_results = web_search_tool.invoke({"query": question})
+    except TypeError:
+        web_results = web_search_tool.invoke(question)
+
+    results_list = (
+        web_results.get("results", []) if isinstance(web_results, dict) else web_results or []
+    )
     documents = [item.get("content", "") for item in results_list if item.get("content")]
+
+    synthesized = (
+        web_results.get("answer") if isinstance(web_results, dict) else None
+    )
+    if synthesized:
+        documents = [synthesized, *documents]
+
+    if not documents:
+        documents = [f"No web search results were returned for the query: {question}"]
 
     shared_state["relevant_documents"] = documents
     shared_state["used_web_search"] = True
     shared_state.setdefault("trace", []).append(
-        f"Tavily web search returned {len(documents)} document(s)."
+        f"Tavily web search returned {len(documents)} document snippet(s)."
     )
     return shared_state
 
