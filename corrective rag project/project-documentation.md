@@ -160,6 +160,31 @@ Optional env vars:
 
 On `Ctrl+C` the script terminates Streamlit and disconnects the ngrok tunnel cleanly.
 
+### Running on Google Colab (free GPU/CPU backend)
+
+Open the **`colab_setup.ipynb`** notebook at the repo root directly in Google Colab:
+
+> https://colab.research.google.com/github/aksri648/CORRECTIVE_RAG_FINAL/blob/main/colab_setup.ipynb
+
+**One-time setup in Colab:**
+1. In the left sidebar, click the **🔑 Secrets** icon and add six secrets with exactly these names:
+   - `KIMCHI_API_KEY`
+   - `TAVILY_API_KEY`
+   - `CHROMA_API_KEY`
+   - `CHROMA_TENANT`
+   - `CHROMA_DATABASE`
+   - `NGROK_AUTH_TOKEN`
+2. Run the three code cells in order.
+3. The final cell prints a public `https://*.ngrok-free.app` URL — open it in any browser. The URL is reachable from anywhere while the Colab runtime stays connected.
+4. Interrupt the cell (▶️ ■) to stop both Streamlit and the ngrok tunnel cleanly.
+
+The notebook:
+- Installs `pyngrok` and the project's `requirements.txt`.
+- Clones this repo into the Colab VM (skipped on re-runs).
+- Loads the six secrets via `google.colab.userdata`, writes them to `.env`, and runs `run.py`.
+
+**Why this works on free Colab:** Chroma Cloud stores vectors remotely, BGE-small is small enough to embed on Colab CPU in seconds, and the Kimchi LLM endpoint is called over HTTPS so the only thing running on the VM is the Streamlit process and the ngrok tunnel.
+
 ---
 
 ## Pipeline walkthrough
