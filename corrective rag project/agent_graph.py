@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
-from langchain import hub
 from langchain_tavily import TavilySearch
 from langgraph.graph import END, StateGraph, START
 
@@ -15,6 +14,23 @@ from prompts import GRADE_DOCUMENTS_PROMPT, QUESTION_REWRITER_PROMPT
 KIMCHI_BASE_URL = os.getenv("KIMCHI_BASE_URL", "https://llm.kimchi.dev/openai/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "minimax-m2.7")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0"))
+
+
+RAG_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an assistant for question-answering tasks. "
+            "Use the following pieces of retrieved context to answer the question. "
+            "If you don't know the answer, just say that you don't know. "
+            "Use three sentences maximum and keep the answer concise.",
+        ),
+        (
+            "human",
+            "Question: {question}\n\nContext:\n{context}\n\nAnswer:",
+        ),
+    ]
+)
 
 
 class SharedState(TypedDict, total=False):
@@ -102,11 +118,10 @@ def grade_and_filter_documents(shared_state: SharedState) -> SharedState:
 
 def generate_answer_from_documents(shared_state: SharedState) -> SharedState:
     model = shared_state["model"]
-    rag_prompt = hub.pull("rlm/rag-prompt")
     question = shared_state["question"]
     documents = shared_state["relevant_documents"]
 
-    rag_chain = rag_prompt | model | StrOutputParser()
+    rag_chain = RAG_PROMPT | model | StrOutputParser()
     model_response = rag_chain.invoke({"context": documents, "question": question})
 
     shared_state["agent_response"] = model_response
